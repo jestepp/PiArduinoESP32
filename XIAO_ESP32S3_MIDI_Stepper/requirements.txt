@@ -1,4 +1,3 @@
 mido
 pyserial
-inquirer
 python-rtmidi

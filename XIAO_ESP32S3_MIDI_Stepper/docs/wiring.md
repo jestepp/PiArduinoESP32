@@ -26,10 +26,11 @@ MIDI and host-side bridge (recommended flow):
 - Connect the XIAO to the PC over USB. Run the Python bridge:
 
 ```bash
-pip install -r requirements.txt
-python midi_interface.py COMx
+.\setup_midi_player.bat
+.\run_midi_player.bat
 ```
 
+- Start loopMIDI and create a virtual MIDI port, or connect a MIDI input device.
 - Select the desired MIDI input port when prompted and play notes on MIDI channels 0, 1 and 2 (they map to motors 0..2).
 
 Troubleshooting quick tips:
