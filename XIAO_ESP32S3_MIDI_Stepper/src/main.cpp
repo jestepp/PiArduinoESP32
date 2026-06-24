@@ -33,6 +33,7 @@ void setup() {
     motors[i]->setAcceleration(1500);
   }
 }
+
 void handleSerialCommand(const String& command) {
   if (command.startsWith("s,")) {
     // Format: s,<motor>,<speed>
