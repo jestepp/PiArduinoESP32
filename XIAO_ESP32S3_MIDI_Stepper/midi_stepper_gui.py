@@ -10,18 +10,22 @@ import mido
 import serial
 import serial.tools.list_ports
 from midi_analyzer import analyze_midi_file, build_single_motor_plan, build_three_motor_plan, format_analysis
+from stepper_pitch_profiles import (
+    CUSTOM_PROFILE_PREFIX,
+    DAVID_SCHOLTEN_PROFILE,
+    STANDARD_PROFILE,
+    built_in_profile_values,
+    note_to_step_frequency,
+    profile_names,
+    profile_values,
+    safe_profile_name,
+    save_custom_profile,
+)
 
 
-A4_KEY = 69
-A4_FREQ = 440
 BAUD_RATE = 115200
 MOTOR_COLORS = ["#3b82f6", "#ef4444", "#22c55e", "#f59e0b"]
 VISUAL_SECONDS = 12.0
-
-
-def note_to_frequency(note):
-    note = max(0, min(127, note))
-    return A4_FREQ * 2 ** ((note - A4_KEY) / 12)
 
 
 class MidiStepperGui(tk.Tk):
@@ -44,10 +48,11 @@ class MidiStepperGui(tk.Tk):
         self.channel_vars = {}
         self.allowed_channels = None
         self.muted_notes = set()
+        self.note_assignments = {}
         self.min_note = tk.StringVar(value="0")
         self.max_note = tk.StringVar(value="127")
-        self.include_percussion = tk.BooleanVar(value=False)
         self.visual_window_seconds = tk.DoubleVar(value=12.0)
+        self.analyzer_vertical_drag_start_y = None
         self.analyzer_window_seconds = tk.DoubleVar(value=24.0)
         self.analyzer_view_start = tk.DoubleVar(value=0.0)
         self.analyzer_lane_zoom = tk.DoubleVar(value=1.0)
@@ -56,7 +61,15 @@ class MidiStepperGui(tk.Tk):
         self.analyzer_notes = []
         self.analyzer_duration = 0.0
         self.analyzer_note_items = {}
+        self.analyzer_lane_items = {}
+        self.analyzer_view_mode = tk.StringVar(value="Motor routing")
         self.channel_summary = tk.StringVar(value="Channels: none")
+        self.assignment_target = tk.StringVar(value="Motor 0")
+        self.assignment_summary = tk.StringVar(value="Assignments: none")
+        self.custom_profile_name = tk.StringVar(value="My Stepper Profile")
+        self.pitch_table_rows = []
+        self.pitch_table_values = built_in_profile_values(STANDARD_PROFILE)
+        self.show_status_log = tk.BooleanVar(value=True)
 
         self.com_port = tk.StringVar()
         self.midi_file = tk.StringVar()
@@ -66,13 +79,50 @@ class MidiStepperGui(tk.Tk):
         self.source_channel = tk.StringVar(value="3")
         self.transpose = tk.StringVar(value="0")
         self.loudness_motors = tk.StringVar(value="1")
+        self.pitch_profile = tk.StringVar(value=STANDARD_PROFILE)
         self.option_summary = tk.StringVar()
-        for option_var in (self.source_channel, self.transpose, self.loudness_motors):
+        for option_var in (self.source_channel, self.transpose, self.loudness_motors, self.pitch_profile):
             option_var.trace_add("write", lambda *_args: self._update_option_summary())
 
+        self._configure_style()
         self._build_ui()
         self.refresh_ports()
         self.after(100, self._drain_log_queue)
+
+    def _configure_style(self):
+        self.configure(background="#0f172a")
+        style = ttk.Style(self)
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass
+        style.configure(".", background="#0f172a", foreground="#e5e7eb", fieldbackground="#020617")
+        style.configure("TFrame", background="#0f172a")
+        style.configure("TLabelframe", background="#0f172a", foreground="#e5e7eb", bordercolor="#1e293b", relief=tk.FLAT)
+        style.configure("TLabelframe.Label", background="#0f172a", foreground="#93c5fd", font=("Segoe UI", 9, "bold"))
+        style.configure("TLabel", background="#0f172a", foreground="#e5e7eb")
+        style.configure("TButton", background="#1e293b", foreground="#f8fafc", bordercolor="#334155", focusthickness=1, padding=(10, 5))
+        style.map("TButton", background=[("active", "#334155"), ("pressed", "#172033")])
+        style.configure("TCheckbutton", background="#0f172a", foreground="#e5e7eb")
+        style.map("TCheckbutton", background=[("active", "#0f172a")])
+        style.configure("TNotebook", background="#0f172a", borderwidth=0)
+        style.configure("TNotebook.Tab", background="#1e293b", foreground="#cbd5e1", padding=(14, 6))
+        style.map("TNotebook.Tab", background=[("selected", "#2563eb")], foreground=[("selected", "#ffffff")])
+        style.configure("TCombobox", fieldbackground="#020617", background="#1e293b", foreground="#f8fafc", arrowcolor="#f8fafc")
+        style.map(
+            "TCombobox",
+            fieldbackground=[("readonly", "#020617"), ("!disabled", "#020617")],
+            foreground=[("readonly", "#f8fafc"), ("!disabled", "#f8fafc")],
+            selectbackground=[("readonly", "#020617"), ("!disabled", "#020617")],
+            selectforeground=[("readonly", "#f8fafc"), ("!disabled", "#f8fafc")],
+        )
+        self.option_add("*TCombobox*Listbox.background", "#020617")
+        self.option_add("*TCombobox*Listbox.foreground", "#f8fafc")
+        self.option_add("*TCombobox*Listbox.selectBackground", "#2563eb")
+        self.option_add("*TCombobox*Listbox.selectForeground", "#ffffff")
+        style.configure("TEntry", fieldbackground="#020617", foreground="#f8fafc", insertcolor="#f8fafc")
+        style.configure("Treeview", background="#111827", fieldbackground="#111827", foreground="#e5e7eb", rowheight=24)
+        style.configure("Treeview.Heading", background="#1e293b", foreground="#e5e7eb")
 
     def _build_ui(self):
         self._build_menu()
@@ -80,22 +130,8 @@ class MidiStepperGui(tk.Tk):
         outer = ttk.Frame(self, padding=10)
         outer.pack(fill=tk.BOTH, expand=True)
 
-        controls = ttk.Frame(outer)
-        controls.pack(fill=tk.X)
-        controls.columnconfigure(3, weight=1)
-
-        ttk.Label(controls, text="XIAO COM").grid(row=0, column=0, sticky="w", pady=2)
-        self.port_combo = ttk.Combobox(controls, textvariable=self.com_port, width=18)
-        self.port_combo.grid(row=0, column=1, sticky="w", padx=(6, 4), pady=2)
-        ttk.Button(controls, text="Refresh", command=self.refresh_ports).grid(row=0, column=2, padx=(0, 10), pady=2)
-
-        ttk.Label(controls, text="MIDI File").grid(row=0, column=3, sticky="e", pady=2)
-        ttk.Entry(controls, textvariable=self.midi_file).grid(row=0, column=4, sticky="ew", padx=(6, 4), pady=2)
-        controls.columnconfigure(4, weight=1)
-        ttk.Button(controls, text="Browse", command=self.browse_file).grid(row=0, column=5, pady=2)
-
         summary_row = ttk.Frame(outer)
-        summary_row.pack(fill=tk.X, pady=(6, 0))
+        summary_row.pack(fill=tk.X)
         ttk.Label(summary_row, textvariable=self.option_summary).pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(summary_row, text="Playback Settings", command=self.open_playback_settings).pack(side=tk.RIGHT)
 
@@ -116,9 +152,12 @@ class MidiStepperGui(tk.Tk):
 
         player_tab = ttk.Frame(self.notebook, padding=8)
         analyzer_tab = ttk.Frame(self.notebook, padding=8)
+        pitch_tab = ttk.Frame(self.notebook, padding=8)
         self.notebook.add(player_tab, text="Player")
         self.notebook.add(analyzer_tab, text="Analyzer / Filters")
+        self.notebook.add(pitch_tab, text="Pitch Mapping")
         self.analyzer_tab = analyzer_tab
+        self.pitch_tab = pitch_tab
 
         player_pane = self._make_vertical_pane(player_tab)
         player_pane.pack(fill=tk.BOTH, expand=True)
@@ -143,7 +182,10 @@ class MidiStepperGui(tk.Tk):
         self.visual_canvas.bind("<B1-Motion>", self._seek_from_canvas_event)
 
         log_frame = ttk.LabelFrame(player_pane, text="Status", padding=8)
+        self.player_pane = player_pane
+        self.log_frame = log_frame
         self.log = tk.Text(log_frame, height=9, wrap=tk.WORD, state=tk.DISABLED)
+        self.log.configure(background="#020617", foreground="#e5e7eb", insertbackground="#f8fafc", relief=tk.FLAT)
         self.log.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar = ttk.Scrollbar(log_frame, command=self.log.yview)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
@@ -153,6 +195,7 @@ class MidiStepperGui(tk.Tk):
         self.after(100, lambda: self._set_initial_sash(player_pane, 0.76))
 
         self._build_analyzer_tab(analyzer_tab)
+        self._build_pitch_mapping_tab(pitch_tab)
         self._sync_option_state()
 
     def _make_vertical_pane(self, parent):
@@ -177,16 +220,44 @@ class MidiStepperGui(tk.Tk):
         except tk.TclError:
             pass
 
+    def reset_layout(self):
+        if hasattr(self, "player_pane"):
+            self.show_status_log.set(True)
+            self.toggle_status_log()
+            self.after(50, lambda: self._set_initial_sash(self.player_pane, 0.76))
+        if hasattr(self, "analyzer_canvas"):
+            self.analyzer_window_seconds.set(24.0)
+            self.analyzer_lane_zoom.set(1.0)
+            self.analyzer_view_start.set(0.0)
+            self.draw_analyzer_preview()
+
+    def toggle_status_log(self):
+        if not hasattr(self, "player_pane") or not hasattr(self, "log_frame"):
+            return
+        panes = list(self.player_pane.panes())
+        log_path = str(self.log_frame)
+        if self.show_status_log.get():
+            if log_path not in panes:
+                self.player_pane.add(self.log_frame, stretch="always", minsize=90)
+        else:
+            if log_path in panes:
+                self.player_pane.forget(self.log_frame)
+
     def _build_menu(self):
         menu_bar = tk.Menu(self)
         self.configure(menu=menu_bar)
 
         file_menu = tk.Menu(menu_bar, tearoff=False)
-        file_menu.add_command(label="Open MIDI File...", command=self.browse_file)
-        file_menu.add_command(label="Refresh Serial Ports", command=self.refresh_ports)
+        file_menu.add_command(label="Import MIDI File...", command=self.browse_file)
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self.destroy)
         menu_bar.add_cascade(label="File", menu=file_menu)
+
+        self.connection_menu = tk.Menu(menu_bar, tearoff=False)
+        self.connection_menu.add_command(label="Refresh Serial Ports", command=self.refresh_ports)
+        self.connection_menu.add_separator()
+        self.connection_menu.add_command(label="No serial ports found", state=tk.DISABLED)
+        menu_bar.add_cascade(label="Connection", menu=self.connection_menu)
 
         playback_menu = tk.Menu(menu_bar, tearoff=False)
         playback_menu.add_command(label="Play", command=self.play)
@@ -220,6 +291,10 @@ class MidiStepperGui(tk.Tk):
         view_menu = tk.Menu(menu_bar, tearoff=False)
         view_menu.add_command(label="Show Player", command=lambda: self.notebook.select(0))
         view_menu.add_command(label="Show Analyzer / Filters", command=self.show_analyzer_tab)
+        view_menu.add_command(label="Show Pitch Mapping", command=lambda: self.notebook.select(self.pitch_tab))
+        view_menu.add_separator()
+        view_menu.add_checkbutton(label="Show Status Log", variable=self.show_status_log, command=self.toggle_status_log)
+        view_menu.add_command(label="Reset Layout", command=self.reset_layout)
         view_menu.add_command(label="Clear Log", command=self.clear_log)
         menu_bar.add_cascade(label="View", menu=view_menu)
 
@@ -268,8 +343,18 @@ class MidiStepperGui(tk.Tk):
             row=5, column=2, sticky="w", padx=(8, 0), pady=4
         )
 
+        ttk.Label(frame, text="Pitch profile").grid(row=6, column=0, sticky="w", pady=4)
+        self.pitch_profile_combo = ttk.Combobox(
+            frame,
+            textvariable=self.pitch_profile,
+            values=profile_names(),
+            width=28,
+            state="readonly",
+        )
+        self.pitch_profile_combo.grid(row=6, column=1, columnspan=2, sticky="w", pady=4)
+
         buttons = ttk.Frame(frame)
-        buttons.grid(row=6, column=0, columnspan=3, sticky="e", pady=(14, 0))
+        buttons.grid(row=7, column=0, columnspan=3, sticky="e", pady=(14, 0))
         ttk.Button(buttons, text="Close", command=window.destroy).pack(side=tk.RIGHT)
         self._sync_option_state()
 
@@ -291,16 +376,13 @@ class MidiStepperGui(tk.Tk):
         self.analyzer_summary = ttk.Label(summary, text="Choose a MIDI file, then click Analyze MIDI or Arrange Filters.", justify=tk.LEFT)
         self.analyzer_summary.pack(anchor="w")
 
-        controls = ttk.LabelFrame(top_panel, text="Filters", padding=8)
+        controls = ttk.LabelFrame(top_panel, text="Visual Edits", padding=8)
         controls.grid(row=1, column=0, sticky="ew", pady=(8, 0))
-        for col in range(10):
-            controls.columnconfigure(col, weight=1)
+        controls.columnconfigure(0, weight=1)
 
         self.channel_vars = {}
         self.channel_menu_indices = {}
-        ttk.Label(controls, textvariable=self.channel_summary).grid(row=0, column=0, columnspan=2, sticky="w")
         channel_button = ttk.Menubutton(controls, text="Channels")
-        channel_button.grid(row=0, column=2, sticky="w", padx=(8, 4))
         self.channel_menu = tk.Menu(channel_button, tearoff=False)
         channel_button["menu"] = self.channel_menu
         for channel in range(1, 17):
@@ -315,22 +397,17 @@ class MidiStepperGui(tk.Tk):
             )
             self.channel_menu_indices[channel] = index
 
-        ttk.Button(controls, text="Best", command=self.select_recommended_channel).grid(row=0, column=3, sticky="w", padx=4)
-        ttk.Button(controls, text="Melodic", command=self.select_melodic_channels).grid(row=0, column=4, sticky="w", padx=4)
-        ttk.Checkbutton(
+        ttk.Label(
             controls,
-            text="Ch 10 percussion",
-            variable=self.include_percussion,
-            command=self._filters_changed,
-        ).grid(row=0, column=5, sticky="w", padx=(8, 4))
-        ttk.Label(controls, text="Notes").grid(row=0, column=6, sticky="e", padx=(8, 4))
-        ttk.Entry(controls, textvariable=self.min_note, width=5).grid(row=0, column=7, sticky="w")
-        ttk.Label(controls, text="to").grid(row=0, column=8, sticky="w", padx=3)
-        ttk.Entry(controls, textvariable=self.max_note, width=5).grid(row=0, column=9, sticky="w")
+            textvariable=self.channel_summary,
+        ).grid(row=0, column=0, sticky="w")
 
         preview_frame = ttk.LabelFrame(
             preview_panel,
-            text="Visual Note Filter - left-click notes to mute/unmute, left-click lane labels to toggle, mouse wheel zooms, right/middle drag pans",
+            text=(
+                "Visual Note Filter - left-click notes to mute/unmute, "
+                "Shift+left-click assigns to selected motor, right/middle drag pans, Ctrl+middle drag scrolls vertically"
+            ),
             padding=8,
         )
         preview_frame.grid(row=0, column=0, sticky="nsew")
@@ -340,7 +417,21 @@ class MidiStepperGui(tk.Tk):
         analyzer_nav.grid(row=0, column=0, sticky="ew", pady=(0, 6))
         analyzer_nav.columnconfigure(1, weight=1)
         analyzer_nav.columnconfigure(4, weight=1)
-        ttk.Label(analyzer_nav, text="Zoom").grid(row=0, column=0, sticky="w")
+        ttk.Label(analyzer_nav, text="Pitch view").grid(row=0, column=0, sticky="w")
+        ttk.Label(analyzer_nav, text="Assign notes to").grid(row=0, column=2, sticky="e", padx=(8, 4))
+        ttk.Combobox(
+            analyzer_nav,
+            textvariable=self.assignment_target,
+            values=("Motor 0", "Motor 1", "Motor 2"),
+            width=8,
+            state="readonly",
+        ).grid(row=0, column=3, sticky="w")
+        ttk.Label(analyzer_nav, textvariable=self.assignment_summary).grid(row=0, column=4, sticky="w", padx=(10, 4))
+        ttk.Button(analyzer_nav, text="Clear Assignments", command=self.clear_note_assignments).grid(
+            row=0, column=5, sticky="e", padx=(8, 0)
+        )
+        self.analyzer_view_mode.trace_add("write", lambda *_args: self.draw_analyzer_preview())
+        ttk.Label(analyzer_nav, text="Zoom").grid(row=1, column=0, sticky="w", pady=(6, 0))
         ttk.Scale(
             analyzer_nav,
             from_=4,
@@ -348,8 +439,8 @@ class MidiStepperGui(tk.Tk):
             orient=tk.HORIZONTAL,
             variable=self.analyzer_window_seconds,
             command=lambda _value: self.draw_analyzer_preview(),
-        ).grid(row=0, column=1, sticky="ew", padx=(8, 16))
-        ttk.Label(analyzer_nav, text="Position").grid(row=0, column=2, sticky="w")
+        ).grid(row=1, column=1, sticky="ew", padx=(8, 16), pady=(6, 0))
+        ttk.Label(analyzer_nav, text="Position").grid(row=1, column=2, sticky="w", pady=(6, 0))
         self.analyzer_scroll = ttk.Scale(
             analyzer_nav,
             from_=0,
@@ -358,8 +449,8 @@ class MidiStepperGui(tk.Tk):
             variable=self.analyzer_view_start,
             command=lambda _value: self.draw_analyzer_preview(),
         )
-        self.analyzer_scroll.grid(row=0, column=4, sticky="ew", padx=(8, 0))
-        ttk.Label(analyzer_nav, text="Lane height").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        self.analyzer_scroll.grid(row=1, column=4, sticky="ew", padx=(8, 0), pady=(6, 0))
+        ttk.Label(analyzer_nav, text="Lane height").grid(row=2, column=0, sticky="w", pady=(6, 0))
         ttk.Scale(
             analyzer_nav,
             from_=1.0,
@@ -367,7 +458,7 @@ class MidiStepperGui(tk.Tk):
             orient=tk.HORIZONTAL,
             variable=self.analyzer_lane_zoom,
             command=lambda _value: self.draw_analyzer_preview(),
-        ).grid(row=1, column=1, columnspan=4, sticky="ew", padx=(8, 0), pady=(6, 0))
+        ).grid(row=2, column=1, columnspan=4, sticky="ew", padx=(8, 0), pady=(6, 0))
 
         analyzer_canvas_frame = ttk.Frame(preview_frame)
         analyzer_canvas_frame.grid(row=1, column=0, sticky="nsew")
@@ -390,6 +481,8 @@ class MidiStepperGui(tk.Tk):
         self.analyzer_canvas.bind("<Configure>", lambda _event: self.draw_analyzer_preview())
         self.analyzer_canvas.bind("<Button-1>", self._analyzer_canvas_click)
         self.analyzer_canvas.bind("<MouseWheel>", self._analyzer_mousewheel)
+        self.analyzer_canvas.bind("<Control-Button-2>", self._analyzer_vertical_pan_start)
+        self.analyzer_canvas.bind("<Control-B2-Motion>", self._analyzer_vertical_pan_drag)
         self.analyzer_canvas.bind("<Button-2>", self._analyzer_pan_start)
         self.analyzer_canvas.bind("<B2-Motion>", self._analyzer_pan_drag)
         self.analyzer_canvas.bind("<Button-3>", self._analyzer_pan_start)
@@ -403,6 +496,159 @@ class MidiStepperGui(tk.Tk):
         analyzer_pane.add(top_panel, stretch="never", minsize=95)
         analyzer_pane.add(preview_panel, stretch="always", minsize=280)
         self.after(100, lambda: self._set_initial_sash(analyzer_pane, 0.25))
+
+    def _build_pitch_mapping_tab(self, parent):
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(1, weight=1)
+
+        controls = ttk.LabelFrame(parent, text="Custom Pitch Profile", padding=8)
+        controls.grid(row=0, column=0, sticky="ew")
+        controls.columnconfigure(5, weight=1)
+
+        ttk.Label(controls, text="Profile name").grid(row=0, column=0, sticky="w")
+        ttk.Entry(controls, textvariable=self.custom_profile_name, width=28).grid(row=0, column=1, sticky="w", padx=(6, 12))
+        ttk.Label(controls, text="Start from").grid(row=0, column=2, sticky="w")
+        self.pitch_source_profile = tk.StringVar(value=STANDARD_PROFILE)
+        ttk.Combobox(
+            controls,
+            textvariable=self.pitch_source_profile,
+            values=(STANDARD_PROFILE, DAVID_SCHOLTEN_PROFILE),
+            width=28,
+            state="readonly",
+        ).grid(row=0, column=3, sticky="w", padx=(6, 8))
+        ttk.Button(controls, text="Load Source", command=self.load_pitch_source_profile).grid(row=0, column=4, sticky="w")
+
+        ttk.Button(controls, text="Save Custom Profile", command=self.save_pitch_mapping_profile).grid(
+            row=1, column=0, columnspan=2, sticky="w", pady=(8, 0)
+        )
+        ttk.Button(controls, text="Reload Saved Profiles", command=self.refresh_pitch_profile_choices).grid(
+            row=1, column=2, columnspan=2, sticky="w", pady=(8, 0)
+        )
+        ttk.Button(controls, text="Use This Profile", command=self.use_current_pitch_mapping).grid(
+            row=1, column=4, sticky="w", pady=(8, 0)
+        )
+        ttk.Label(
+            controls,
+            text="Edit frequency values in Hz. Pulse us updates on save/load as 1,000,000 / Hz.",
+        ).grid(row=1, column=5, sticky="w", padx=(12, 0), pady=(8, 0))
+
+        table_frame = ttk.LabelFrame(parent, text="MIDI Note Pitch Table", padding=8)
+        table_frame.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
+        table_frame.rowconfigure(0, weight=1)
+        table_frame.columnconfigure(0, weight=1)
+
+        columns = ("note", "name", "frequency", "pulse")
+        self.pitch_tree = ttk.Treeview(table_frame, columns=columns, show="headings", selectmode="browse")
+        self.pitch_tree.heading("note", text="MIDI")
+        self.pitch_tree.heading("name", text="Note")
+        self.pitch_tree.heading("frequency", text="Frequency Hz")
+        self.pitch_tree.heading("pulse", text="Pulse us")
+        self.pitch_tree.column("note", width=70, anchor="e", stretch=False)
+        self.pitch_tree.column("name", width=90, anchor="w", stretch=False)
+        self.pitch_tree.column("frequency", width=140, anchor="e")
+        self.pitch_tree.column("pulse", width=140, anchor="e")
+        self.pitch_tree.grid(row=0, column=0, sticky="nsew")
+        pitch_scroll = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=self.pitch_tree.yview)
+        pitch_scroll.grid(row=0, column=1, sticky="ns")
+        self.pitch_tree.configure(yscrollcommand=pitch_scroll.set)
+        self.pitch_tree.bind("<Double-1>", self.edit_selected_pitch_value)
+
+        self.populate_pitch_table(self.pitch_table_values)
+
+    def midi_note_name(self, note):
+        names = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
+        octave = note // 12 - 1
+        return f"{names[note % 12]}{octave}"
+
+    def populate_pitch_table(self, values):
+        self.pitch_table_values = [float(value) for value in values]
+        if not hasattr(self, "pitch_tree"):
+            return
+        self.pitch_tree.delete(*self.pitch_tree.get_children())
+        for note, frequency in enumerate(self.pitch_table_values):
+            pulse = 1_000_000.0 / frequency if frequency > 0 else 0.0
+            self.pitch_tree.insert(
+                "",
+                "end",
+                iid=str(note),
+                values=(note, self.midi_note_name(note), f"{frequency:.6f}", f"{pulse:.3f}"),
+            )
+
+    def load_pitch_source_profile(self):
+        values = profile_values(self.pitch_source_profile.get())
+        self.populate_pitch_table(values)
+        self._log(f"Loaded pitch source profile: {self.pitch_source_profile.get()}.")
+
+    def edit_selected_pitch_value(self, _event=None):
+        selection = self.pitch_tree.selection()
+        if not selection:
+            return
+        note = int(selection[0])
+        window = tk.Toplevel(self)
+        window.title(f"Edit MIDI Note {note} {self.midi_note_name(note)}")
+        window.resizable(False, False)
+        window.transient(self)
+        window.grab_set()
+
+        value = tk.StringVar(value=f"{self.pitch_table_values[note]:.6f}")
+        frame = ttk.Frame(window, padding=14)
+        frame.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(frame, text=f"MIDI {note} {self.midi_note_name(note)} frequency Hz").grid(row=0, column=0, sticky="w")
+        entry = ttk.Entry(frame, textvariable=value, width=18)
+        entry.grid(row=1, column=0, sticky="w", pady=(6, 0))
+        entry.focus_set()
+
+        def apply_value():
+            try:
+                frequency = float(value.get().strip())
+            except ValueError:
+                messagebox.showerror("Invalid Frequency", "Frequency must be a number.")
+                return
+            if frequency <= 0:
+                messagebox.showerror("Invalid Frequency", "Frequency must be greater than zero.")
+                return
+            self.pitch_table_values[note] = frequency
+            pulse = 1_000_000.0 / frequency
+            self.pitch_tree.item(
+                str(note),
+                values=(note, self.midi_note_name(note), f"{frequency:.6f}", f"{pulse:.3f}"),
+            )
+            window.destroy()
+
+        buttons = ttk.Frame(frame)
+        buttons.grid(row=2, column=0, sticky="e", pady=(12, 0))
+        ttk.Button(buttons, text="Apply", command=apply_value).pack(side=tk.RIGHT)
+        ttk.Button(buttons, text="Cancel", command=window.destroy).pack(side=tk.RIGHT, padx=(0, 8))
+        window.bind("<Return>", lambda _event: apply_value())
+
+    def save_pitch_mapping_profile(self):
+        try:
+            name = save_custom_profile(self.custom_profile_name.get(), self.pitch_table_values)
+        except ValueError as exc:
+            messagebox.showerror("Save Failed", str(exc))
+            return
+        profile = f"{CUSTOM_PROFILE_PREFIX}{name}"
+        self.custom_profile_name.set(name)
+        self.refresh_pitch_profile_choices()
+        self.pitch_profile.set(profile)
+        self._log(f"Saved custom pitch profile: {name}.")
+
+    def use_current_pitch_mapping(self):
+        name = safe_profile_name(self.custom_profile_name.get())
+        profile = f"{CUSTOM_PROFILE_PREFIX}{name}"
+        if profile not in profile_names():
+            self.save_pitch_mapping_profile()
+        else:
+            self.pitch_profile.set(profile)
+            self._log(f"Selected pitch profile: {profile}.")
+
+    def refresh_pitch_profile_choices(self):
+        names = profile_names()
+        if hasattr(self, "pitch_profile_combo") and self.pitch_profile_combo.winfo_exists():
+            self.pitch_profile_combo.configure(values=names)
+        current = self.pitch_profile.get()
+        if current not in names:
+            self.pitch_profile.set(STANDARD_PROFILE)
 
     def _sync_option_state(self):
         if self.auto_single_motor.get():
@@ -434,15 +680,25 @@ class MidiStepperGui(tk.Tk):
         channel = self.source_channel.get().strip() or "all"
         transpose = self.transpose.get().strip() or "0"
         loudness = self.loudness_motors.get().strip() or "1"
+        profile = self.pitch_profile.get().replace(" equal temperament", "")
         self.option_summary.set(
-            f"Mode: {mode}   Source channel: {channel}   Transpose: {transpose}   Loudness motors: {loudness}"
+            f"Mode: {mode}   Source channel: {channel}   Transpose: {transpose}   "
+            f"Loudness motors: {loudness}   Pitch: {profile}"
         )
 
     def refresh_ports(self):
         ports = [port.device for port in serial.tools.list_ports.comports()]
-        self.port_combo["values"] = ports
         if ports and self.com_port.get() not in ports:
             self.com_port.set(ports[0])
+        if hasattr(self, "connection_menu"):
+            self.connection_menu.delete(0, tk.END)
+            self.connection_menu.add_command(label="Refresh Serial Ports", command=self.refresh_ports)
+            self.connection_menu.add_separator()
+            if ports:
+                for port in ports:
+                    self.connection_menu.add_radiobutton(label=port, variable=self.com_port, value=port)
+            else:
+                self.connection_menu.add_command(label="No serial ports found", state=tk.DISABLED)
         self._log(f"Serial ports: {', '.join(ports) if ports else 'none found'}")
 
     def browse_file(self):
@@ -539,14 +795,15 @@ class MidiStepperGui(tk.Tk):
             text=(
                 f"{analysis['path'].name}\n"
                 f"Length: {analysis['length']:.2f}s   Tracks: {analysis['tracks']}   "
-                f"Recommended channel: {analysis['recommended_channel'] or 'n/a'}\n"
-                f"Muted channel/note pairs: {len(self.muted_notes)}"
+                f"Unique notes: {len({note['note'] for note in self.analyzer_notes})}\n"
+                f"Muted notes: {len(self.muted_notes)}   "
+                f"Assigned notes: {len(self.note_assignments)}"
             )
         )
 
         note_counts = analysis["note_counts"]
         for channel, var in self.channel_vars.items():
-            default_enabled = note_counts.get(channel, 0) > 0 and (self.include_percussion.get() or channel != 10)
+            default_enabled = note_counts.get(channel, 0) > 0
             if self.allowed_channels is not None:
                 default_enabled = channel in self.allowed_channels
             var.set(default_enabled)
@@ -580,7 +837,7 @@ class MidiStepperGui(tk.Tk):
             analysis = self.current_analysis
         note_counts = analysis["note_counts"]
         for channel, var in self.channel_vars.items():
-            var.set(channel in note_counts and channel != 10)
+            var.set(channel in note_counts)
         self._filters_changed()
 
     def clear_muted_notes(self):
@@ -590,20 +847,38 @@ class MidiStepperGui(tk.Tk):
 
     def _filters_changed(self):
         self._update_channel_summary()
+        self._update_assignment_summary()
         self.draw_analyzer_preview()
 
     def _update_channel_summary(self):
         enabled = [channel for channel, var in self.channel_vars.items() if var.get()]
         if not enabled:
-            text = "Channels: none"
+            text = "Loaded notes: none"
         elif len(enabled) == 16:
-            text = "Channels: all"
+            text = "Loaded notes: all MIDI parts"
         elif len(enabled) <= 5:
-            text = "Channels: " + ", ".join(str(channel) for channel in enabled)
+            text = f"Loaded notes: {len(enabled)} MIDI part(s)"
         else:
-            text = f"Channels: {len(enabled)} selected"
+            text = f"Loaded notes: {len(enabled)} MIDI parts"
         if hasattr(self, "channel_summary"):
             self.channel_summary.set(text)
+
+    def _update_assignment_summary(self):
+        count = len(self.note_assignments)
+        text = "Assignments: none" if count == 0 else f"Assignments: {count}"
+        if hasattr(self, "assignment_summary"):
+            self.assignment_summary.set(text)
+
+    def _selected_assignment_motor(self):
+        match = re.search(r"(\d+)", self.assignment_target.get())
+        if not match:
+            return 0
+        return max(0, min(2, int(match.group(1))))
+
+    def clear_note_assignments(self):
+        self.note_assignments.clear()
+        self._filters_changed()
+        self._log("Note assignments cleared.")
 
     def apply_arrangement_filters(self):
         try:
@@ -630,7 +905,8 @@ class MidiStepperGui(tk.Tk):
         self._log(
             "Arrangement filters applied: "
             f"channels {', '.join(str(c) for c in sorted(allowed))}, "
-            f"notes {min_note}-{max_note}, muted note pairs {len(self.muted_notes)}."
+            f"notes {min_note}-{max_note}, muted note pairs {len(self.muted_notes)}, "
+            f"assigned note pairs {len(self.note_assignments)}."
         )
 
     def _collect_midi_preview_notes(self, midi_path):
@@ -664,16 +940,35 @@ class MidiStepperGui(tk.Tk):
             min_note, max_note = 0, 127
         return max(0, min_note), min(127, max_note)
 
+    def _midi_note_name(self, note):
+        names = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
+        return f"{names[note % 12]}{note // 12 - 1}"
+
+    def _pitch_scale_label(self, note):
+        transposed = note
+        try:
+            transposed += int(self.transpose.get().strip() or "0")
+        except ValueError:
+            pass
+        try:
+            frequency = note_to_step_frequency(transposed, self.pitch_profile.get())
+        except Exception:
+            frequency = 0.0
+        if frequency > 0:
+            return f"{self._midi_note_name(note)} {frequency:.1f}Hz"
+        return self._midi_note_name(note)
+
     def draw_analyzer_preview(self):
         if not hasattr(self, "analyzer_canvas"):
             return
         canvas = self.analyzer_canvas
         canvas.delete("all")
         self.analyzer_note_items = {}
+        self.analyzer_lane_items = {}
 
         width = max(canvas.winfo_width(), 1)
         viewport_height = max(canvas.winfo_height(), 1)
-        left_pad = 78
+        left_pad = 122
         right_pad = 10
         top_pad = 10
         bottom_pad = 22
@@ -705,6 +1000,25 @@ class MidiStepperGui(tk.Tk):
             self.analyzer_scroll.configure(to=max_start if max_start > 0 else 1)
             if abs(float(self.analyzer_view_start.get()) - view_start) > 0.001:
                 self.analyzer_view_start.set(view_start)
+
+        if self.analyzer_view_mode.get() == "Motor routing":
+            self._draw_motor_routing_preview(
+                canvas,
+                width,
+                content_height,
+                left_pad,
+                right_pad,
+                top_pad,
+                bottom_pad,
+                plot_width,
+                plot_height,
+                view_start,
+                view_end,
+                visible_seconds,
+                min_allowed_note,
+                max_allowed_note,
+            )
+            return
 
         visible_notes_by_channel = {}
         for note in self.analyzer_notes:
@@ -776,7 +1090,7 @@ class MidiStepperGui(tk.Tk):
             else:
                 pitch_ratio = max(0, min(1, (note["note"] - 24) / 72))
                 y = y0 + lane_height - 3 - pitch_ratio * max(lane_height - 6, 1)
-                bar_half_height = 2
+                bar_half_height = 4
             x0 = left_pad + (note["start"] - view_start) / visible_seconds * plot_width
             x1 = left_pad + (note["end"] - view_start) / visible_seconds * plot_width
             if x1 - x0 < 2:
@@ -784,15 +1098,27 @@ class MidiStepperGui(tk.Tk):
 
             channel_enabled = self.channel_vars.get(channel, tk.BooleanVar(value=False)).get()
             range_enabled = min_allowed_note <= note["note"] <= max_allowed_note
-            muted = (channel, note["note"]) in self.muted_notes
+            key = (channel, note["note"])
+            muted = key in self.muted_notes
+            assigned_motor = self.note_assignments.get(key)
             if muted:
                 color = "#7f1d1d"
+            elif assigned_motor is not None:
+                color = MOTOR_COLORS[assigned_motor % len(MOTOR_COLORS)]
             elif channel_enabled and range_enabled:
-                color = "#38bdf8" if channel != 10 else "#f97316"
+                color = "#38bdf8"
             else:
                 color = "#4b5563"
-            item = canvas.create_rectangle(x0, y - bar_half_height, x1, y + bar_half_height, fill=color, outline="")
-            self.analyzer_note_items[item] = (channel, note["note"])
+            outline = "#f9fafb" if assigned_motor is not None else ""
+            item = canvas.create_rectangle(
+                x0,
+                y - bar_half_height,
+                x1,
+                y + bar_half_height,
+                fill=color,
+                outline=outline,
+            )
+            self.analyzer_note_items[item] = key
 
         canvas.create_text(
             width - 8,
@@ -806,21 +1132,206 @@ class MidiStepperGui(tk.Tk):
             font=("Segoe UI", 8),
         )
 
+    def _preview_note_motor(self, note, min_allowed_note, max_allowed_note):
+        channel = note["channel"]
+        midi_note = note["note"]
+        key = (channel, midi_note)
+        if key in self.muted_notes:
+            return None
+        if not (min_allowed_note <= midi_note <= max_allowed_note):
+            return None
+        if not self.channel_vars.get(channel, tk.BooleanVar(value=False)).get():
+            return None
+        assigned_motor = self.note_assignments.get(key)
+        if assigned_motor is not None:
+            return assigned_motor
+        source_text = self.source_channel.get().strip()
+        if source_text and not self.auto_single_motor.get() and not self.auto_three_motor.get():
+            try:
+                source_channel = int(source_text)
+            except ValueError:
+                source_channel = None
+            if source_channel is not None:
+                if channel == source_channel:
+                    return 0
+                return None
+        if self.single_stepper.get() or self.auto_single_motor.get():
+            return 0
+        enabled_channels = [ch for ch, var in self.channel_vars.items() if var.get()]
+        if self.auto_three_motor.get() or len(enabled_channels) > 0:
+            first_three = sorted(enabled_channels)[:3]
+            if channel in first_three:
+                return first_three.index(channel)
+        if 1 <= channel <= 3:
+            return channel - 1
+        return None
+
+    def _draw_motor_routing_preview(
+        self,
+        canvas,
+        width,
+        content_height,
+        left_pad,
+        right_pad,
+        top_pad,
+        bottom_pad,
+        plot_width,
+        plot_height,
+        view_start,
+        view_end,
+        visible_seconds,
+        min_allowed_note,
+        max_allowed_note,
+    ):
+        lane_names = ("Motor 0", "Motor 1", "Motor 2", "Muted / filtered")
+        lane_notes = {lane: set() for lane in range(len(lane_names))}
+        visible_notes = []
+
+        for note in self.analyzer_notes:
+            if note["end"] < view_start or note["start"] > view_end:
+                continue
+            motor = self._preview_note_motor(note, min_allowed_note, max_allowed_note)
+            lane = motor if motor is not None else 3
+            lane_notes[lane].add(note["note"])
+            visible_notes.append((note, lane, motor))
+
+        pitch_rows = {
+            lane: {note_value: index for index, note_value in enumerate(sorted(note_values, reverse=True))}
+            for lane, note_values in lane_notes.items()
+        }
+        lane_zoom = max(1.0, min(float(self.analyzer_lane_zoom.get()), 4.0))
+        row_unit = 16 * lane_zoom
+        lane_heights = {}
+        for lane in range(len(lane_names)):
+            row_count = max(1, len(pitch_rows[lane]))
+            if lane == 3 and not pitch_rows[lane]:
+                lane_heights[lane] = 28
+            else:
+                lane_heights[lane] = max(34, min(260, 24 + row_count * row_unit))
+
+        lane_tops = {}
+        y_cursor = top_pad
+        for lane in range(len(lane_names)):
+            lane_tops[lane] = y_cursor
+            y_cursor += lane_heights[lane]
+        lane_bottom = y_cursor
+        dynamic_content_height = max(canvas.winfo_height(), int(lane_bottom + bottom_pad))
+        canvas.configure(scrollregion=(0, 0, width, dynamic_content_height))
+        canvas.create_rectangle(0, 0, width, dynamic_content_height, fill="#111827", outline="")
+
+        for lane, name in enumerate(lane_names):
+            y0 = lane_tops[lane]
+            y1 = y0 + lane_heights[lane]
+            fill = "#172033" if lane < 3 else "#18181b"
+            outline = MOTOR_COLORS[lane] if lane < 3 else "#52525b"
+            canvas.create_rectangle(left_pad, y0, width - right_pad, y1, fill=fill, outline=outline, width=2)
+            label_color = MOTOR_COLORS[lane] if lane < 3 else "#a1a1aa"
+            canvas.create_text(8, y0 + 9, anchor="w", text=name, fill=label_color, font=("Segoe UI", 9, "bold"))
+            if pitch_rows[lane]:
+                row_count = max(1, len(pitch_rows[lane]))
+                row_height = lane_heights[lane] / row_count
+                for note_value, row_index in pitch_rows[lane].items():
+                    row_y = y0 + row_index * row_height
+                    center_y = row_y + row_height / 2
+                    canvas.create_line(left_pad, row_y, width - right_pad, row_y, fill="#243244")
+                    if row_height >= 9:
+                        canvas.create_text(
+                            left_pad - 8,
+                            center_y,
+                            anchor="e",
+                            text=self._pitch_scale_label(note_value),
+                            fill="#cbd5e1",
+                            font=("Segoe UI", 7),
+                        )
+
+        grid_step = 1
+        if visible_seconds > 20:
+            grid_step = 5
+        if visible_seconds > 60:
+            grid_step = 10
+        first_second = int(view_start // grid_step * grid_step)
+        for second in range(first_second, int(view_end) + grid_step, grid_step):
+            x = left_pad + (second - view_start) / visible_seconds * plot_width
+            canvas.create_line(x, top_pad, x, lane_bottom, fill="#374151")
+            canvas.create_text(x + 2, lane_bottom + 10, anchor="w", text=f"{second}s", fill="#9ca3af", font=("Segoe UI", 8))
+
+        for note, lane, motor in visible_notes:
+            y0 = lane_tops[lane]
+            if pitch_rows[lane]:
+                rows = pitch_rows[lane]
+                row_count = max(1, len(rows))
+                row_height = lane_heights[lane] / row_count
+                row_index = rows.get(note["note"], 0)
+                y = y0 + row_index * row_height + row_height / 2
+                bar_half_height = max(3, min(8, row_height / 2 - 1))
+            else:
+                y = y0 + lane_heights[lane] / 2
+                bar_half_height = 4
+
+            x0 = left_pad + (note["start"] - view_start) / visible_seconds * plot_width
+            x1 = left_pad + (note["end"] - view_start) / visible_seconds * plot_width
+            if x1 - x0 < 3:
+                x1 = x0 + 3
+
+            key = (note["channel"], note["note"])
+            assigned = key in self.note_assignments
+            muted = key in self.muted_notes
+            if muted:
+                color = "#991b1b"
+            elif motor is None:
+                color = "#52525b"
+            else:
+                color = MOTOR_COLORS[motor % len(MOTOR_COLORS)]
+            outline = "#f9fafb" if assigned else ""
+            item = canvas.create_rectangle(x0, y - bar_half_height, x1, y + bar_half_height, fill=color, outline=outline)
+            self.analyzer_note_items[item] = key
+            if x1 - x0 >= 34 and bar_half_height >= 4:
+                text_item = canvas.create_text(
+                    x0 + 3,
+                    y,
+                    anchor="w",
+                    text=self._midi_note_name(note["note"]),
+                    fill="#f9fafb",
+                    font=("Segoe UI", 7),
+                )
+                self.analyzer_note_items[text_item] = key
+
+        canvas.create_text(
+            width - 8,
+            canvas.canvasy(0) + 8,
+            anchor="ne",
+            text=f"{view_start:.2f}s - {min(view_end, self.analyzer_duration):.2f}s   Motor routing by pitch",
+            fill="#d1d5db",
+            font=("Segoe UI", 8),
+        )
+
     def _analyzer_canvas_click(self, event):
         canvas = self.analyzer_canvas
-        canvas_y = canvas.canvasy(event.y)
-        clicked_items = canvas.find_overlapping(event.x - 2, canvas_y - 2, event.x + 2, canvas_y + 2)
-        for item in reversed(clicked_items):
-            if item in self.analyzer_note_items:
-                key = self.analyzer_note_items[item]
-                if key in self.muted_notes:
-                    self.muted_notes.remove(key)
-                    self._log(f"Unmuted channel {key[0]} note {key[1]}.")
+        key = self._analyzer_note_key_at_event(event)
+        if key is not None:
+            if event.state & 0x0001:
+                motor = self._selected_assignment_motor()
+                if self.note_assignments.get(key) == motor:
+                    del self.note_assignments[key]
+                    self._log(f"Cleared assignment for channel {key[0]} note {key[1]}.")
                 else:
-                    self.muted_notes.add(key)
-                    self._log(f"Muted channel {key[0]} note {key[1]}.")
-                self.draw_analyzer_preview()
-                return
+                    self.note_assignments[key] = motor
+                    self._log(f"Assigned channel {key[0]} note {key[1]} to motor {motor}.")
+                self._filters_changed()
+                return "break"
+            if key in self.muted_notes:
+                self.muted_notes.remove(key)
+                self._log(f"Unmuted channel {key[0]} note {key[1]}.")
+            else:
+                self.muted_notes.add(key)
+                self._log(f"Muted channel {key[0]} note {key[1]}.")
+            self._filters_changed()
+            return "break"
+
+        canvas_y = canvas.canvasy(event.y)
+
+        if self.analyzer_view_mode.get() == "Motor routing":
+            return "break"
 
         viewport_height = max(canvas.winfo_height(), 1)
         top_pad = 10
@@ -832,7 +1343,25 @@ class MidiStepperGui(tk.Tk):
         channel = int((canvas_y - top_pad) / lane_height) + 1
         if 1 <= channel <= 16 and channel in self.channel_vars:
             self.channel_vars[channel].set(not self.channel_vars[channel].get())
-            self.draw_analyzer_preview()
+            self._filters_changed()
+        return "break"
+
+    def _analyzer_note_key_at_event(self, event):
+        canvas = self.analyzer_canvas
+        canvas_x = canvas.canvasx(event.x)
+        canvas_y = canvas.canvasy(event.y)
+        for radius in (5, 9, 14):
+            clicked_items = canvas.find_overlapping(
+                canvas_x - radius,
+                canvas_y - radius,
+                canvas_x + radius,
+                canvas_y + radius,
+            )
+            for item in reversed(clicked_items):
+                key = self.analyzer_note_items.get(item)
+                if key is not None:
+                    return key
+        return None
 
     def _analyzer_mousewheel(self, event):
         if self.analyzer_duration <= 0:
@@ -858,12 +1387,17 @@ class MidiStepperGui(tk.Tk):
         self.draw_analyzer_preview()
 
     def _analyzer_pan_start(self, event):
+        if event.state & 0x0004:
+            return self._analyzer_vertical_pan_start(event)
         self.analyzer_drag_start_x = event.x
         self.analyzer_drag_start_view = float(self.analyzer_view_start.get())
+        return "break"
 
     def _analyzer_pan_drag(self, event):
+        if event.state & 0x0004:
+            return self._analyzer_vertical_pan_drag(event)
         if self.analyzer_duration <= 0 or self.analyzer_drag_start_x is None:
-            return
+            return "break"
         canvas = self.analyzer_canvas
         width = max(canvas.winfo_width(), 1)
         left_pad = 78
@@ -876,6 +1410,16 @@ class MidiStepperGui(tk.Tk):
         new_start = max(0.0, min(self.analyzer_drag_start_view + delta_seconds, max_start))
         self.analyzer_view_start.set(new_start)
         self.draw_analyzer_preview()
+        return "break"
+
+    def _analyzer_vertical_pan_start(self, event):
+        self.analyzer_vertical_drag_start_y = event.y
+        self.analyzer_canvas.scan_mark(event.x, event.y)
+        return "break"
+
+    def _analyzer_vertical_pan_drag(self, event):
+        self.analyzer_canvas.scan_dragto(event.x, event.y, gain=1)
+        return "break"
 
     def _read_preview_config(self):
         midi_path = Path(self.midi_file.get().strip().strip('"'))
@@ -921,12 +1465,13 @@ class MidiStepperGui(tk.Tk):
             "auto_three_motor": auto_three_motor,
             "source_channel": source_channel,
             "transpose": transpose,
+            "pitch_profile": self.pitch_profile.get(),
             "loudness_motors": max(1, min(3, loudness_motors)),
             "allowed_channels": self.allowed_channels,
             "min_note": min_note,
             "max_note": max_note,
-            "include_percussion": self.include_percussion.get(),
             "muted_notes": set(self.muted_notes),
+            "note_assignments": dict(self.note_assignments),
         }
 
     def rebuild_main_visualizer_preview(self):
@@ -947,7 +1492,6 @@ class MidiStepperGui(tk.Tk):
                 config["allowed_channels"],
                 config["min_note"],
                 config["max_note"],
-                config["include_percussion"],
             )
             three_motor_plan = None
         elif config["auto_three_motor"]:
@@ -959,7 +1503,6 @@ class MidiStepperGui(tk.Tk):
                 config["allowed_channels"],
                 config["min_note"],
                 config["max_note"],
-                config["include_percussion"],
             )
         elif config["motor"] is not None:
             target_motors = [config["motor"]]
@@ -1031,7 +1574,7 @@ class MidiStepperGui(tk.Tk):
         note_counts = analysis["note_counts"]
         for channel in range(1, 17):
             count = note_counts.get(channel, 0)
-            default_enabled = count > 0 and (self.include_percussion.get() or channel != 10)
+            default_enabled = count > 0
             if self.allowed_channels is not None:
                 default_enabled = channel in self.allowed_channels
             var = tk.BooleanVar(value=default_enabled)
@@ -1047,13 +1590,10 @@ class MidiStepperGui(tk.Tk):
 
         filters = ttk.LabelFrame(outer, text="Note Filters", padding=10)
         filters.pack(fill=tk.X, pady=(12, 0))
-        ttk.Checkbutton(filters, text="Allow channel 10 percussion", variable=self.include_percussion).grid(
-            row=0, column=0, columnspan=4, sticky="w", pady=(0, 8)
-        )
-        ttk.Label(filters, text="Min MIDI note").grid(row=1, column=0, sticky="w")
-        ttk.Entry(filters, textvariable=self.min_note, width=8).grid(row=1, column=1, sticky="w", padx=(8, 16))
-        ttk.Label(filters, text="Max MIDI note").grid(row=1, column=2, sticky="w")
-        ttk.Entry(filters, textvariable=self.max_note, width=8).grid(row=1, column=3, sticky="w", padx=(8, 0))
+        ttk.Label(filters, text="Min MIDI note").grid(row=0, column=0, sticky="w")
+        ttk.Entry(filters, textvariable=self.min_note, width=8).grid(row=0, column=1, sticky="w", padx=(8, 16))
+        ttk.Label(filters, text="Max MIDI note").grid(row=0, column=2, sticky="w")
+        ttk.Entry(filters, textvariable=self.max_note, width=8).grid(row=0, column=3, sticky="w", padx=(8, 0))
 
         plan_frame = ttk.LabelFrame(outer, text="Visual Channel / Note Filter Preview", padding=10)
         plan_frame.pack(fill=tk.BOTH, expand=True, pady=(12, 0))
@@ -1259,12 +1799,13 @@ class MidiStepperGui(tk.Tk):
             "auto_three_motor": auto_three_motor,
             "source_channel": source_channel,
             "transpose": transpose,
+            "pitch_profile": self.pitch_profile.get(),
             "loudness_motors": loudness_motors,
             "allowed_channels": self.allowed_channels,
             "min_note": min_note,
             "max_note": max_note,
-            "include_percussion": self.include_percussion.get(),
             "muted_notes": set(self.muted_notes),
+            "note_assignments": dict(self.note_assignments),
         }
 
     def _play_worker(self, config):
@@ -1285,6 +1826,7 @@ class MidiStepperGui(tk.Tk):
         min_note,
         max_note,
         muted_notes,
+        note_assignments,
     ):
         if not hasattr(msg, "channel"):
             return None
@@ -1294,6 +1836,12 @@ class MidiStepperGui(tk.Tk):
             return None
         if allowed_channels is not None and msg.channel + 1 not in allowed_channels:
             return None
+        if hasattr(msg, "note"):
+            assigned_motor = note_assignments.get((msg.channel + 1, msg.note))
+            if assigned_motor is not None:
+                if assigned_motor < motor_channels:
+                    return [assigned_motor]
+                return None
         if source_index is not None and msg.channel != source_index:
             return None
 
@@ -1306,8 +1854,6 @@ class MidiStepperGui(tk.Tk):
 
         if three_motor_plan is not None:
             channel = msg.channel + 1
-            if channel == 10 and (allowed_channels is None or 10 not in allowed_channels):
-                return None
             if three_motor_plan["mode"] == "channels":
                 if channel not in three_motor_plan["channel_to_motor"]:
                     return None
@@ -1359,6 +1905,7 @@ class MidiStepperGui(tk.Tk):
                 config["min_note"],
                 config["max_note"],
                 config["muted_notes"],
+                config["note_assignments"],
             )
             if not motors:
                 continue
@@ -1366,7 +1913,7 @@ class MidiStepperGui(tk.Tk):
             is_note_on = msg.type == "note_on" and msg.velocity > 0
             is_note_off = msg.type == "note_off" or (msg.type == "note_on" and msg.velocity == 0)
             if is_note_on:
-                frequency = note_to_frequency(msg.note + config["transpose"])
+                frequency = note_to_step_frequency(msg.note + config["transpose"], config["pitch_profile"])
                 timed_events.append(
                     {
                         "time": elapsed,
@@ -1490,7 +2037,7 @@ class MidiStepperGui(tk.Tk):
 
     def _seek_from_canvas_event(self, event):
         if self.visual_duration <= 0:
-            return
+            return "break"
         canvas = self.visual_canvas
         width = max(canvas.winfo_width(), 1)
         left_pad = 74
@@ -1508,6 +2055,7 @@ class MidiStepperGui(tk.Tk):
         with self.seek_lock:
             self.seek_request = clicked_time
         self._log(f"Seek requested: {clicked_time:.2f}s")
+        return "break"
 
     def _play_midi(self, config):
         midi_path = config["midi_path"]
@@ -1562,7 +2110,6 @@ class MidiStepperGui(tk.Tk):
                     config["allowed_channels"],
                     config["min_note"],
                     config["max_note"],
-                    config["include_percussion"],
                 )
                 three_motor_plan = None
             elif config["auto_three_motor"]:
@@ -1574,7 +2121,6 @@ class MidiStepperGui(tk.Tk):
                     config["allowed_channels"],
                     config["min_note"],
                     config["max_note"],
-                    config["include_percussion"],
                 )
             elif config["motor"] is not None:
                 target_motors = [config["motor"]]
@@ -1614,6 +2160,7 @@ class MidiStepperGui(tk.Tk):
                 self._log(f"Filtering to MIDI channel {config['source_channel']}.")
             if config["transpose"]:
                 self._log(f"Transpose: {config['transpose']:+d} semitones.")
+            self._log(f"Pitch profile: {config['pitch_profile']}.")
             if target_motors is not None and len(target_motors) > 1:
                 self._log(f"Loudness mode on motors: {', '.join(str(m) for m in target_motors)}")
             if single_motor_plan is not None:

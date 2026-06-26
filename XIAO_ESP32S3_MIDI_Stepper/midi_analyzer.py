@@ -5,12 +5,10 @@ from pathlib import Path
 import mido
 
 
-def _message_allowed(msg, allowed_channels=None, min_note=0, max_note=127, include_percussion=False):
+def _message_allowed(msg, allowed_channels=None, min_note=0, max_note=127):
     if not hasattr(msg, "channel"):
         return False
     channel = msg.channel + 1
-    if channel == 10 and not include_percussion:
-        return False
     if allowed_channels is not None and channel not in allowed_channels:
         return False
     if hasattr(msg, "note") and not (min_note <= msg.note <= max_note):
@@ -18,14 +16,14 @@ def _message_allowed(msg, allowed_channels=None, min_note=0, max_note=127, inclu
     return True
 
 
-def build_single_motor_plan(path, allowed_channels=None, min_note=0, max_note=127, include_percussion=False):
+def build_single_motor_plan(path, allowed_channels=None, min_note=0, max_note=127):
     midi_path = Path(path)
     midi_file = mido.MidiFile(midi_path)
     note_counts = Counter()
 
     for track in midi_file.tracks:
         for msg in track:
-            if not _message_allowed(msg, allowed_channels, min_note, max_note, include_percussion):
+            if not _message_allowed(msg, allowed_channels, min_note, max_note):
                 continue
             if msg.type == "note_on" and msg.velocity > 0:
                 note_counts[msg.channel + 1] += 1
@@ -42,7 +40,7 @@ def build_single_motor_plan(path, allowed_channels=None, min_note=0, max_note=12
     }
 
 
-def build_three_motor_plan(path, motor_count=3, allowed_channels=None, min_note=0, max_note=127, include_percussion=False):
+def build_three_motor_plan(path, motor_count=3, allowed_channels=None, min_note=0, max_note=127):
     midi_path = Path(path)
     midi_file = mido.MidiFile(midi_path)
     note_counts = Counter()
@@ -50,7 +48,7 @@ def build_three_motor_plan(path, motor_count=3, allowed_channels=None, min_note=
 
     for track in midi_file.tracks:
         for msg in track:
-            if not _message_allowed(msg, allowed_channels, min_note, max_note, include_percussion):
+            if not _message_allowed(msg, allowed_channels, min_note, max_note):
                 continue
             if msg.type == "note_on" and msg.velocity > 0:
                 channel = msg.channel + 1
@@ -106,11 +104,8 @@ def analyze_midi_file(path):
                 note_counts[channel] += 1
 
     recommended = None
-    recommended_any = None
     if note_counts:
-        recommended_any = note_counts.most_common(1)[0][0]
-        melodic_counts = Counter({channel: count for channel, count in note_counts.items() if channel != 10})
-        recommended = melodic_counts.most_common(1)[0][0] if melodic_counts else recommended_any
+        recommended = note_counts.most_common(1)[0][0]
 
     single_motor_plan = build_single_motor_plan(midi_path)
     three_motor_plan = build_three_motor_plan(midi_path)
@@ -124,7 +119,7 @@ def analyze_midi_file(path):
         "note_counts": dict(sorted(note_counts.items())),
         "event_counts": dict(sorted(event_counts.items())),
         "recommended_channel": recommended,
-        "busiest_channel": recommended_any,
+        "busiest_channel": recommended,
         "single_motor_plan": single_motor_plan,
         "three_motor_plan": three_motor_plan,
     }
@@ -154,15 +149,13 @@ def format_analysis(analysis):
                 f"Recommended source channel: {analysis['recommended_channel']}",
             ]
         )
-        if analysis["busiest_channel"] == 10 and analysis["recommended_channel"] != 10:
-            lines.append("Note: channel 10 has the most notes, but it is usually percussion.")
 
     single_plan = analysis["single_motor_plan"]
     lines.extend(["", "Recommended 1-motor simplifier:"])
     if single_plan["mode"] == "channel":
         lines.append(f"  MIDI channel {single_plan['source_channel']} -> motor 0")
     else:
-        lines.append("  Not enough melodic note data found.")
+        lines.append("  Not enough note data found.")
 
     plan = analysis["three_motor_plan"]
     lines.extend(["", "Recommended 3-motor arrangement:"])
@@ -175,7 +168,7 @@ def format_analysis(analysis):
         lines.append(f"  Mid notes {low_threshold + 1}-{high_threshold} -> motor 1")
         lines.append(f"  High notes > {high_threshold} -> motor 2")
     else:
-        lines.append("  Not enough melodic note data found.")
+        lines.append("  Not enough note data found.")
 
     return "\n".join(lines)
 

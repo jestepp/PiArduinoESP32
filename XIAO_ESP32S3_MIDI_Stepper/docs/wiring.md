@@ -11,6 +11,7 @@ XIAO -> Stepper driver signal wiring (default pins used in `src/main.cpp`):
 - GPIO4  -> STEP2
 - GPIO7  -> DIR2
 - GPIO8  -> ENABLE (shared enable for drivers)
+- GPIO9  -> NeoPixel DIN (3 LEDs chained, one LED per motor)
 
 Important notes and safety:
 
@@ -19,6 +20,9 @@ Important notes and safety:
 - Keep motor power wiring separate from logic wiring as much as possible; use short, thick wires for motor supply and twisted pairs where appropriate.
 - Before connecting motors to drivers, verify coil pair polarity using a multimeter or the paperclip polarity test; reversed coils will reduce torque or cause poor operation.
 - Set current limit on your driver (A4988/DRV8825 or similar) appropriately for your motors before running at full speed.
+- NeoPixels should share ground with the XIAO. Use an external 5V LED supply for anything beyond a tiny test setup, and keep the LED 5V supply separate from the stepper motor supply.
+- Add a 330-470 ohm resistor between GPIO9 and the first NeoPixel DIN. A capacitor across the LED 5V/GND input is also recommended for strips or rings.
+- Pixel order is motor order: pixel 0 = motor 0, pixel 1 = motor 1, pixel 2 = motor 2. A pixel turns on with its motor note and turns off when that motor note ends.
 
 MIDI and host-side bridge (recommended flow):
 
@@ -53,11 +57,30 @@ This project uses a Seeed XIAO ESP32-S3 as the controller, three stepper motor d
 - `GPIO4` -> `STEP2`
 - `GPIO7` -> `DIR2`
 - `GPIO8` -> `ENABLE`
+- `GPIO9` / `D10` -> `NeoPixel DIN`
 
 ### Notes
 - All stepper driver grounds must be connected to the XIAO ground.
 - Motor power must come from the stepper driver power supply, not the XIAO USB.
 - Use separate wiring for motor power and logic power when possible.
+- NeoPixel ground must also connect to XIAO ground. NeoPixel 5V should come from a suitable 5V supply, not the 24V motor supply.
+
+## NeoPixel Status LEDs
+
+This project supports one NeoPixel per motor without changing the stepper wiring.
+
+- Use a 3-pixel WS2812/NeoPixel strip, stick, or three chained pixels.
+- Wire `GPIO9` / `D10` to the first pixel `DIN`.
+- Wire first pixel `DOUT` to second pixel `DIN`, then second `DOUT` to third `DIN`.
+- Pixel 0 follows motor 0, pixel 1 follows motor 1, and pixel 2 follows motor 2.
+- The firmware lights a pixel when a note starts, turns it off when that note ends, and chooses the color from the note frequency.
+
+NeoPixel power wiring:
+
+- XIAO `GND` -> NeoPixel `GND`
+- External regulated `5V` -> NeoPixel `5V`
+- XIAO `GPIO9` / `D10` -> `330-470 ohm resistor` -> first NeoPixel `DIN`
+- Do not connect NeoPixels directly to the stepper motor voltage supply.
 
 ## Example Diagram
 

@@ -5,16 +5,10 @@ import time
 from pathlib import Path
 
 from midi_analyzer import build_single_motor_plan, build_three_motor_plan
+from stepper_pitch_profiles import PITCH_PROFILES, STANDARD_PROFILE, note_to_step_frequency
 
 
-A4_KEY = 69
-A4_FREQ = 440
 BAUD_RATE = 115200
-
-
-def note_to_frequency(note):
-    note = max(0, min(127, note))
-    return A4_FREQ * 2 ** ((note - A4_KEY) / 12)
 
 
 def connect_serial(serial_module, arduino_port):
@@ -65,6 +59,12 @@ def main(argv=None):
     parser.add_argument("--motor", type=int, help="Force all playable notes onto one motor index, for example 0")
     parser.add_argument("--source-channel", type=int, help="Only play one MIDI channel, using 1-16 numbering")
     parser.add_argument("--transpose", type=int, default=0, help="Transpose playback by this many semitones")
+    parser.add_argument(
+        "--pitch-profile",
+        choices=PITCH_PROFILES,
+        default=STANDARD_PROFILE,
+        help="Pitch-to-step-rate mapping to use for playback",
+    )
     parser.add_argument(
         "--loudness-motors",
         type=int,
@@ -156,6 +156,7 @@ def main(argv=None):
             print(f"Channel filter: only playing MIDI channel {args.source_channel}.")
         if args.transpose:
             print(f"Pitch transpose: {args.transpose:+d} semitones.")
+        print(f"Pitch profile: {args.pitch_profile}.")
         if target_motors is not None and len(target_motors) > 1:
             motor_list = ", ".join(str(motor) for motor in target_motors)
             print(f"Loudness mode: duplicating notes on motors {motor_list}.")
@@ -224,7 +225,7 @@ def main(argv=None):
                 continue
 
             if msg.type == "note_on" and msg.velocity > 0:
-                frequency = note_to_frequency(msg.note + args.transpose)
+                frequency = note_to_step_frequency(msg.note + args.transpose, args.pitch_profile)
                 for motor_index in motors_for_message:
                     if active_notes[motor_index] is not None:
                         ser.write(f"e,{motor_index}\n".encode())
