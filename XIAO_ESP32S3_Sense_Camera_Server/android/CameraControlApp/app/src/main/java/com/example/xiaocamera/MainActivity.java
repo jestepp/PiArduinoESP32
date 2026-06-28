@@ -48,12 +48,12 @@ public class MainActivity extends Activity {
         root.setGravity(Gravity.CENTER_HORIZONTAL);
 
         status = new TextView(this);
-        status.setText("Open the camera AP, then load http://192.168.4.1 or scan BLE.");
+        status.setText("Open the camera AP, then load http://169.254.4.1 or scan BLE.");
         root.addView(status);
 
         url = new EditText(this);
         url.setSingleLine(true);
-        url.setText("http://192.168.4.1");
+        url.setText("http://169.254.4.1");
         root.addView(url);
 
         Button load = new Button(this);

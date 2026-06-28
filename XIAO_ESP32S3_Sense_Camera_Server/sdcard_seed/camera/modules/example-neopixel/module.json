@@ -1,0 +1,8 @@
+﻿{
+  "name": "example-neopixel",
+  "version": "0.1.0",
+  "type": "config",
+  "requiresFirmware": ["neopixel"],
+  "description": "Example SD module manifest. Runtime config can live here, but C++ libraries must be compiled into firmware.",
+  "entry": "config.json"
+}
